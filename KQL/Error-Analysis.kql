@@ -1,0 +1,241 @@
+// ============================================================================
+// Error Analysis — Finding and Diagnosing Problems
+// ============================================================================
+//
+// WHAT YOU WILL LEARN:
+//   - How to find errors in AppExceptions
+//   - How to correlate errors with the requests that caused them
+//   - How to find failed model calls and understand why they failed
+//   - How to use "contains" and "startswith" for text searching
+//   - How to group errors to find the most common problems
+//
+// WHY THIS MATTERS:
+//   When your Foundry agents fail, the evidence is in the logs.
+//   Knowing how to quickly find and diagnose errors saves hours of debugging.
+//
+// WHERE TO RUN:
+//   Azure Portal → Log Analytics workspace → Logs
+// ============================================================================
+
+
+// ---------------------------------------------------------------------------
+// STEP 1: Are there any recent exceptions?
+// ---------------------------------------------------------------------------
+// Let's check if any errors have been recorded.
+
+AppExceptions
+| where TimeGenerated > ago(24h)
+| count
+
+// If the count is 0, your application has been running error-free.
+// If the count is > 0, let's investigate.
+
+
+// ---------------------------------------------------------------------------
+// STEP 2: Browse recent exceptions
+// ---------------------------------------------------------------------------
+
+AppExceptions
+| where TimeGenerated > ago(24h)
+| project TimeGenerated, ExceptionType, OuterMessage, ProblemId, SeverityLevel
+| sort by TimeGenerated desc
+| take 20
+
+// Key columns:
+//   ExceptionType  → The error class (e.g., "openai.APIError", "HttpRequestError")
+//   OuterMessage   → Human-readable error description
+//   ProblemId      → A grouping key to find similar errors
+//   SeverityLevel  → How critical (3 = Error, 4 = Critical)
+
+
+// ---------------------------------------------------------------------------
+// STEP 3: What are the most common error types?
+// ---------------------------------------------------------------------------
+// Group exceptions by type to see patterns.
+
+AppExceptions
+| where TimeGenerated > ago(7d)
+| summarize ErrorCount = count() by ExceptionType
+| sort by ErrorCount desc
+
+// The most frequent error type appears at the top.
+// Common ones you might see with Foundry:
+//   "openai.RateLimitError"    → Too many requests to the model
+//   "openai.APIError"          → General API error
+//   "HttpRequestError"         → Network connectivity issue
+//   "openai.AuthenticationError" → Invalid API key or credentials
+
+
+// ---------------------------------------------------------------------------
+// STEP 4: Group errors by ProblemId
+// ---------------------------------------------------------------------------
+// ProblemId groups similar errors together, even if the messages differ slightly.
+
+AppExceptions
+| where TimeGenerated > ago(7d)
+| summarize
+    ErrorCount     = count(),
+    FirstSeen      = min(TimeGenerated),
+    LastSeen       = max(TimeGenerated),
+    SampleMessage  = take_any(OuterMessage)
+    by ProblemId, ExceptionType
+| sort by ErrorCount desc
+
+// "take_any()" grabs one example Message from the group.
+// This gives you a quick overview of all distinct problems.
+
+
+// ---------------------------------------------------------------------------
+// STEP 5: Find failed dependency calls (model call failures)
+// ---------------------------------------------------------------------------
+// Not all errors are exceptions. Model calls can fail with HTTP error codes.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Success == false
+| project TimeGenerated, Name, Target, ResultCode, DurationMs
+| sort by TimeGenerated desc
+| take 20
+
+// Common ResultCode values:
+//   "429" → Rate limited — you're sending too many requests
+//   "401" → Unauthorized — check your credentials
+//   "403" → Forbidden — check your permissions
+//   "500" → Internal server error — issue on Azure's side
+//   "503" → Service unavailable — temporary outage
+
+
+// ---------------------------------------------------------------------------
+// STEP 6: Count failed calls by result code
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Success == false
+| summarize FailureCount = count() by ResultCode
+| sort by FailureCount desc
+| render columnchart
+
+// The bar chart quickly shows which error codes are most common.
+
+
+// ---------------------------------------------------------------------------
+// STEP 7: Failed model calls specifically
+// ---------------------------------------------------------------------------
+// Filter to only AI model call failures.
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Success == false
+| where Properties has "gen_ai.system"
+| extend
+    ModelUsed  = tostring(Properties["gen_ai.request.model"]),
+    Operation  = tostring(Properties["gen_ai.operation.name"])
+| summarize FailureCount = count() by ModelUsed, ResultCode
+| sort by FailureCount desc
+
+// This tells you which models are failing and why.
+
+
+// ---------------------------------------------------------------------------
+// STEP 8: Success rate over time
+// ---------------------------------------------------------------------------
+// What percentage of model calls succeed each hour?
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| summarize
+    TotalCalls   = count(),
+    SuccessCalls = countif(Success == true),
+    FailedCalls  = countif(Success == false)
+    by bin(TimeGenerated, 1h)
+| extend SuccessRate = round(100.0 * SuccessCalls / TotalCalls, 1)
+| project TimeGenerated, TotalCalls, SuccessCalls, FailedCalls, SuccessRate
+| sort by TimeGenerated asc
+
+// "countif()" counts only rows matching a condition — very useful!
+// A healthy application should show a SuccessRate near 100%.
+
+
+// ---------------------------------------------------------------------------
+// STEP 9: Visualize success rate over time
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| summarize
+    TotalCalls   = count(),
+    SuccessCalls = countif(Success == true)
+    by bin(TimeGenerated, 1h)
+| extend SuccessRate = round(100.0 * SuccessCalls / TotalCalls, 1)
+| project TimeGenerated, SuccessRate
+| render timechart
+
+// A sudden drop in the success rate chart is an immediate red flag.
+
+
+// ---------------------------------------------------------------------------
+// STEP 10: Correlate an exception with its full trace
+// ---------------------------------------------------------------------------
+// When you find an exception, use its OperationId to see the full context.
+
+// First, find an exception and its OperationId:
+AppExceptions
+| where TimeGenerated > ago(7d)
+| project TimeGenerated, ExceptionType, OuterMessage, OperationId
+| sort by TimeGenerated desc
+| take 5
+
+// Then use that OperationId to see everything that happened:
+// (Replace with an actual OperationId from the query above)
+
+let traceId = "PASTE_OPERATION_ID_FROM_EXCEPTION";
+union
+    (AppRequests     | where OperationId == traceId | project TimeGenerated, Type = "Request",    Info = Name, Success),
+    (AppDependencies | where OperationId == traceId | project TimeGenerated, Type = "Dependency", Info = Name, Success),
+    (AppExceptions   | where OperationId == traceId | project TimeGenerated, Type = "Exception",  Info = strcat(ExceptionType, ": ", OuterMessage), Success = false),
+    (AppTraces       | where OperationId == traceId | project TimeGenerated, Type = "Trace",      Info = Message, Success = true)
+| sort by TimeGenerated asc
+
+// This gives you the full timeline of what happened leading up to the error.
+// You can see exactly which step failed and what came before it.
+
+
+// ---------------------------------------------------------------------------
+// STEP 11: Search for specific error messages
+// ---------------------------------------------------------------------------
+// Use "contains" to search within text columns.
+
+AppExceptions
+| where TimeGenerated > ago(7d)
+| where OuterMessage contains "rate limit"
+| project TimeGenerated, ExceptionType, OuterMessage
+| sort by TimeGenerated desc
+| take 10
+
+// "contains" does a case-insensitive substring search.
+// Use "startswith" if you know how the message begins:
+//   | where OuterMessage startswith "Error"
+// Use "has" for whole-word matching (faster than contains):
+//   | where OuterMessage has "timeout"
+
+
+// ============================================================================
+// RECAP — What You Learned:
+//
+//   - AppExceptions     → Stores exception/error records
+//   - Success == false  → Finds failed dependency calls in AppDependencies
+//   - countif()         → Counts rows matching a condition
+//   - contains          → Case-insensitive substring search
+//   - startswith        → Match the beginning of a string
+//   - has               → Whole-word search (faster)
+//   - strcat()          → Concatenate strings together
+//   - take_any()        → Grab one example value from a group
+//
+//   Combining AppExceptions + AppDependencies gives you a complete
+//   error analysis toolkit for your Foundry agents.
+//
+// NEXT: Build monitoring dashboard queries.
+// ============================================================================

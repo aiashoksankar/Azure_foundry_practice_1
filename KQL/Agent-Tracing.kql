@@ -1,0 +1,228 @@
+// ============================================================================
+// Agent Tracing — Following a Request End-to-End
+// ============================================================================
+//
+// WHAT YOU WILL LEARN:
+//   - How to trace a single agent conversation across multiple tables
+//   - How OperationId connects all the pieces together
+//   - How to use "union" to combine data from multiple tables
+//   - How to identify agent runs, tool calls, and model invocations
+//   - How to use "let" statements for reusable variables
+//
+// BACKGROUND:
+//   When a user talks to a Foundry agent, a chain of events happens:
+//     1. An incoming request arrives (AppRequests)
+//     2. The agent calls an AI model (AppDependencies)
+//     3. The model might call tools (more AppDependencies records)
+//     4. Log messages are emitted (AppTraces)
+//     5. If something goes wrong, errors appear (AppExceptions)
+//
+//   All of these records share the same OperationId — that's how you
+//   correlate them into a single end-to-end trace.
+//
+// WHERE TO RUN:
+//   Azure Portal → Log Analytics workspace → Logs
+// ============================================================================
+
+
+// ---------------------------------------------------------------------------
+// STEP 1: Find recent operations to trace
+// ---------------------------------------------------------------------------
+// Let's start by finding some recent OperationIds we can investigate.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| project TimeGenerated, OperationId, Name
+| sort by TimeGenerated desc
+| take 10
+
+// Pick an OperationId from the results. You'll use it in the next steps.
+// An OperationId looks like a long string, for example:
+//   "abcd1234ef567890abcd1234ef567890"
+
+
+// ---------------------------------------------------------------------------
+// STEP 2: Use "let" to store an OperationId for reuse
+// ---------------------------------------------------------------------------
+// The "let" statement creates a variable you can use throughout your query.
+// Replace the example below with an OperationId from Step 1.
+
+let traceId = "PASTE_YOUR_OPERATION_ID_HERE";
+AppDependencies
+| where OperationId == traceId
+| project TimeGenerated, Name, DurationMs, Success
+| sort by TimeGenerated asc
+
+// This shows all the dependency calls (model calls, tool calls) in that
+// single conversation, in chronological order.
+
+
+// ---------------------------------------------------------------------------
+// STEP 3: See the full trace across multiple tables using "union"
+// ---------------------------------------------------------------------------
+// "union" combines rows from multiple tables into one result set.
+// This lets you see the complete picture of what happened.
+
+let traceId = "PASTE_YOUR_OPERATION_ID_HERE";
+union
+    (AppRequests | where OperationId == traceId | project TimeGenerated, Type = "Request", Name, DurationMs, Success, Id, ParentId),
+    (AppDependencies | where OperationId == traceId | project TimeGenerated, Type = "Dependency", Name, DurationMs, Success, Id, ParentId),
+    (AppTraces | where OperationId == traceId | project TimeGenerated, Type = "Trace", Name = Message, DurationMs = 0.0, Success = true, Id = "", ParentId = "")
+| sort by TimeGenerated asc
+
+// You now see a timeline of everything that happened:
+//   - "Request"    = The incoming user message
+//   - "Dependency" = Outbound calls (AI model, tools)
+//   - "Trace"      = Log messages emitted during processing
+
+
+// ---------------------------------------------------------------------------
+// STEP 4: Identify agent operations within a trace
+// ---------------------------------------------------------------------------
+// Foundry's agent framework tags spans with gen_ai.operation.name.
+// Let's see the different operation types in a single trace.
+
+let traceId = "PASTE_YOUR_OPERATION_ID_HERE";
+AppDependencies
+| where OperationId == traceId
+| extend
+    Operation = tostring(Properties["gen_ai.operation.name"]),
+    AgentName = tostring(Properties["gen_ai.agent.name"]),
+    ToolName  = tostring(Properties["gen_ai.tool.name"]),
+    ModelUsed = tostring(Properties["gen_ai.response.model"])
+| project TimeGenerated, Name, Operation, AgentName, ToolName, ModelUsed, DurationMs
+| sort by TimeGenerated asc
+
+// You might see operations like:
+//   "chat"              → A chat completion call to the model
+//   "execute_tool"      → A tool being executed
+//   "agent.run"         → The top-level agent execution
+//   "invoke_agent"      → One agent calling another agent
+
+
+// ---------------------------------------------------------------------------
+// STEP 5: Find all traces that involved a specific agent
+// ---------------------------------------------------------------------------
+// If you know your agent's name, you can search for all its activity.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.agent.name"
+| extend AgentName = tostring(Properties["gen_ai.agent.name"])
+| summarize
+    CallCount   = count(),
+    AvgDuration = avg(DurationMs)
+    by AgentName
+| sort by CallCount desc
+
+// This shows all your agents and how active they've been.
+
+
+// ---------------------------------------------------------------------------
+// STEP 6: Find all traces that used tools
+// ---------------------------------------------------------------------------
+// Let's see which tools are being called and how often.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.tool.name"
+| extend
+    ToolName  = tostring(Properties["gen_ai.tool.name"]),
+    AgentName = tostring(Properties["gen_ai.agent.name"])
+| summarize
+    CallCount   = count(),
+    AvgDuration = avg(DurationMs)
+    by ToolName, AgentName
+| sort by CallCount desc
+
+
+// ---------------------------------------------------------------------------
+// STEP 7: View log messages for a specific trace
+// ---------------------------------------------------------------------------
+// AppTraces contains the log messages your agent emitted.
+
+let traceId = "PASTE_YOUR_OPERATION_ID_HERE";
+AppTraces
+| where OperationId == traceId
+| project TimeGenerated, Message, SeverityLevel
+| sort by TimeGenerated asc
+
+// SeverityLevel meanings:
+//   0 = Verbose (very detailed)
+//   1 = Information (normal)
+//   2 = Warning
+//   3 = Error
+//   4 = Critical
+
+
+// ---------------------------------------------------------------------------
+// STEP 8: Check for evaluation results in traces
+// ---------------------------------------------------------------------------
+// If you use Foundry's continuous evaluation feature, the results
+// are logged to AppTraces with a special message.
+
+AppTraces
+| where TimeGenerated > ago(24h)
+| where Message == "gen_ai.evaluation.result"
+| project TimeGenerated, OperationId, Properties
+| sort by TimeGenerated desc
+| take 10
+
+// The Properties column will contain the evaluation scores.
+
+
+// ---------------------------------------------------------------------------
+// STEP 9: Measure end-to-end latency for agent conversations
+// ---------------------------------------------------------------------------
+// How long does a complete agent conversation take from start to finish?
+
+AppRequests
+| where TimeGenerated > ago(24h)
+| extend DurationSeconds = round(DurationMs / 1000.0, 2)
+| project TimeGenerated, OperationName, DurationMs, DurationSeconds, Success, OperationId
+| sort by DurationMs desc
+| take 20
+
+// The DurationMs on an AppRequests record represents the total time
+// from when the request arrived to when the response was sent back.
+
+
+// ---------------------------------------------------------------------------
+// STEP 10: Build a span tree for a single request
+// ---------------------------------------------------------------------------
+// Using Id and ParentId, we can see the parent-child relationship
+// between spans. This shows you the call hierarchy.
+
+let traceId = "PASTE_YOUR_OPERATION_ID_HERE";
+union
+    (AppRequests | where OperationId == traceId
+     | extend SpanType = "Request", SpanName = Name
+     | project TimeGenerated, SpanType, SpanName, Id, ParentId, DurationMs),
+    (AppDependencies | where OperationId == traceId
+     | extend SpanType = "Dependency", SpanName = Name
+     | project TimeGenerated, SpanType, SpanName, Id, ParentId, DurationMs)
+| sort by TimeGenerated asc
+
+// Records where ParentId is empty are root spans.
+// Match a record's ParentId to another record's Id to see the hierarchy:
+//   Request (root)
+//     └─ Dependency: agent.run
+//         ├─ Dependency: chat gpt-5.1
+//         └─ Dependency: execute_tool search
+
+
+// ============================================================================
+// RECAP — What You Learned:
+//
+//   - OperationId      → Ties all records from one conversation together
+//   - let              → Creates reusable variables in KQL
+//   - union            → Combines rows from multiple tables
+//   - Id / ParentId    → Shows the parent-child span hierarchy
+//   - gen_ai.agent.name / gen_ai.tool.name → Identifies agents and tools
+//
+//   These tracing techniques are essential for debugging your Foundry
+//   agents and understanding how they process each conversation.
+//
+// NEXT: Investigate errors using AppExceptions.
+// ============================================================================

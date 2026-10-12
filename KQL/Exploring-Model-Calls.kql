@@ -1,0 +1,204 @@
+// ============================================================================
+// Exploring AI Model Calls in AppDependencies
+// ============================================================================
+//
+// WHAT YOU WILL LEARN:
+//   - How Foundry logs AI model calls (chat completions) to AppDependencies
+//   - How to read the gen_ai.* properties that contain model details
+//   - How to extract model name, operation type, and token counts
+//   - How to use "extend" with "tostring()" and "toint()" to parse properties
+//
+// BACKGROUND:
+//   When your Foundry agent calls an AI model (e.g., gpt-5.1, DeepSeek),
+//   the OpenTelemetry instrumentation captures that call as a "dependency".
+//   The call details — model name, tokens used, etc. — are stored inside
+//   the "Properties" column as key-value pairs following the OpenTelemetry
+//   GenAI semantic conventions (gen_ai.*).
+//
+// WHERE TO RUN:
+//   Azure Portal → Log Analytics workspace → Logs
+// ============================================================================
+
+
+// ---------------------------------------------------------------------------
+// STEP 1: Browse raw AppDependencies data
+// ---------------------------------------------------------------------------
+// Let's start by looking at what's in AppDependencies.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| take 5
+
+// Notice the "Properties" column — it's a dynamic (JSON-like) column.
+// That's where the AI-specific details live.
+
+
+// ---------------------------------------------------------------------------
+// STEP 2: Find only the AI model calls
+// ---------------------------------------------------------------------------
+// Foundry stores a property called "gen_ai.system" for AI-related calls.
+// We can use this to filter down to just the model calls.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| take 10
+
+// The "has" keyword checks if the text appears anywhere in the column.
+// This is a quick way to find GenAI-related dependency records.
+
+
+// ---------------------------------------------------------------------------
+// STEP 3: Extract the gen_ai properties into readable columns
+// ---------------------------------------------------------------------------
+// The Properties column is a dynamic (JSON) object. We use "extend" with
+// "tostring()" to pull out individual values.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| extend
+    AISystem    = tostring(Properties["gen_ai.system"]),
+    Operation   = tostring(Properties["gen_ai.operation.name"]),
+    ModelAsked  = tostring(Properties["gen_ai.request.model"]),
+    ModelUsed   = tostring(Properties["gen_ai.response.model"])
+| project TimeGenerated, Name, AISystem, Operation, ModelAsked, ModelUsed, DurationMs, Success
+| take 20
+
+// Now you can clearly see:
+//   - AISystem:   "openai" (the provider)
+//   - Operation:  "chat" (it was a chat completion call)
+//   - ModelAsked: the model you requested (e.g., "gpt-5.1")
+//   - ModelUsed:  the model that actually responded
+
+
+// ---------------------------------------------------------------------------
+// STEP 4: Extract token usage
+// ---------------------------------------------------------------------------
+// Each AI call reports how many tokens were consumed. This is critical
+// for understanding costs and performance.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| extend
+    ModelUsed    = tostring(Properties["gen_ai.response.model"]),
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| extend TotalTokens = InputTokens + OutputTokens
+| project TimeGenerated, ModelUsed, InputTokens, OutputTokens, TotalTokens, DurationMs
+| sort by TimeGenerated desc
+| take 20
+
+
+// ---------------------------------------------------------------------------
+// STEP 5: Which models are being used?
+// ---------------------------------------------------------------------------
+// Let's get a list of all unique models your Foundry agents have called.
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Properties has "gen_ai.system"
+| extend ModelUsed = tostring(Properties["gen_ai.response.model"])
+| distinct ModelUsed
+
+// This is useful to verify that your agents are calling the correct models.
+
+
+// ---------------------------------------------------------------------------
+// STEP 6: How long do model calls take?
+// ---------------------------------------------------------------------------
+// Let's look at the average response time per model.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| extend ModelUsed = tostring(Properties["gen_ai.response.model"])
+| summarize
+    AvgDurationMs = avg(DurationMs),
+    MinDurationMs = min(DurationMs),
+    MaxDurationMs = max(DurationMs),
+    CallCount     = count()
+    by ModelUsed
+
+// "summarize" groups rows and calculates aggregations.
+// Here we see average, min, max duration, and total call count per model.
+
+
+// ---------------------------------------------------------------------------
+// STEP 7: See the target endpoints
+// ---------------------------------------------------------------------------
+// The "Target" column shows which Foundry endpoint was called.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| extend ModelUsed = tostring(Properties["gen_ai.response.model"])
+| project TimeGenerated, Name, Target, ModelUsed, DurationMs
+| take 10
+
+// The Target typically shows your Foundry project endpoint, for example:
+//   "my-project.services.ai.azure.com"
+
+
+// ---------------------------------------------------------------------------
+// STEP 8: Check for failed model calls
+// ---------------------------------------------------------------------------
+// Let's see if any AI model calls have failed.
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Properties has "gen_ai.system"
+| where Success == false
+| extend
+    ModelUsed = tostring(Properties["gen_ai.response.model"]),
+    Operation = tostring(Properties["gen_ai.operation.name"])
+| project TimeGenerated, Name, ModelUsed, Operation, ResultCode, DurationMs
+| sort by TimeGenerated desc
+| take 20
+
+// If you see results here, check the ResultCode column for HTTP status codes:
+//   429 = Rate limited (too many requests)
+//   401 = Authentication issue
+//   500 = Server error
+
+
+// ---------------------------------------------------------------------------
+// STEP 9: What does a finish reason tell us?
+// ---------------------------------------------------------------------------
+// The model reports why it stopped generating. Usually "stop" means
+// the model finished its response naturally.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| extend
+    ModelUsed     = tostring(Properties["gen_ai.response.model"]),
+    FinishReasons = tostring(Properties["gen_ai.response.finish_reasons"])
+| summarize count() by ModelUsed, FinishReasons
+
+// Common finish reasons:
+//   "stop"         → Model completed its response
+//   "length"       → Response was cut off (hit token limit)
+//   "tool_calls"   → Model wants to call a tool
+
+
+// ============================================================================
+// RECAP — What You Learned:
+//
+//   - AppDependencies stores all outbound AI model calls
+//   - The "Properties" column contains gen_ai.* attributes:
+//       gen_ai.system              → AI provider (e.g., "openai")
+//       gen_ai.operation.name      → Operation type (e.g., "chat")
+//       gen_ai.request.model       → Model you requested
+//       gen_ai.response.model      → Model that responded
+//       gen_ai.usage.input_tokens  → Prompt token count
+//       gen_ai.usage.output_tokens → Completion token count
+//       gen_ai.response.finish_reasons → Why generation stopped
+//
+//   - Use tostring() and toint() to extract values from Properties
+//   - Use "has" to quickly check if a property exists
+//   - Use "summarize" to aggregate data (avg, min, max, count)
+//
+// NEXT: Continue with token usage analysis.
+// ============================================================================

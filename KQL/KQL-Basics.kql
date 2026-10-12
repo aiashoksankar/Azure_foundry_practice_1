@@ -1,0 +1,191 @@
+// ============================================================================
+// KQL Basics — Your First Queries in Azure Log Analytics
+// ============================================================================
+//
+// WHAT YOU WILL LEARN:
+//   - How to run a basic KQL query
+//   - The most common KQL operators: take, where, project, sort, count
+//   - How to explore the tables that Microsoft Foundry writes to
+//   - How to filter and shape your results
+//
+// WHERE TO RUN THESE QUERIES:
+//   Open the Azure Portal → Navigate to your Log Analytics workspace
+//   (the one connected to your Application Insights resource) → Click "Logs"
+//   Copy-paste each query block below into the query editor and click "Run"
+//
+// TIP: Run each query one at a time. Select just the lines you want to run,
+//      then click "Run". This way you can step through the demo.
+// ============================================================================
+
+
+// ---------------------------------------------------------------------------
+// STEP 1: See what tables are available
+// ---------------------------------------------------------------------------
+// When Microsoft Foundry sends telemetry to Application Insights, the data
+// lands in several tables. Let's start by simply looking at one of them.
+//
+// The "take" operator grabs a specified number of rows — great for exploring.
+
+AppRequests
+| take 5
+
+// You should see 5 rows from the AppRequests table. Each row represents
+// an incoming request that your Foundry application handled.
+
+
+// ---------------------------------------------------------------------------
+// STEP 2: Explore another table — AppDependencies
+// ---------------------------------------------------------------------------
+// AppDependencies stores outbound calls your app made. When your Foundry
+// agent calls an AI model (like gpt-5.1), that call shows up here.
+
+AppDependencies
+| take 5
+
+// Look at the columns: Name, Target, DurationMs, Success, Properties.
+// These will be very important in the next demos.
+
+
+// ---------------------------------------------------------------------------
+// STEP 3: The "where" operator — Filtering rows
+// ---------------------------------------------------------------------------
+// The "where" operator keeps only the rows that match a condition.
+// Let's find only the requests from the last 24 hours.
+
+AppRequests
+| where TimeGenerated > ago(24h)
+| take 10
+
+// "ago(24h)" means "24 hours before now". You can also use:
+//   ago(1h)   — last hour
+//   ago(7d)   — last 7 days
+//   ago(30m)  — last 30 minutes
+
+
+// ---------------------------------------------------------------------------
+// STEP 4: Combining filters
+// ---------------------------------------------------------------------------
+// You can chain multiple "where" clauses. Let's find only successful
+// requests from the last 24 hours.
+
+AppRequests
+| where TimeGenerated > ago(24h)
+| where Success == true
+| take 10
+
+// You can also combine conditions in a single "where" using "and":
+AppRequests
+| where TimeGenerated > ago(24h) and Success == true
+| take 10
+
+
+// ---------------------------------------------------------------------------
+// STEP 5: The "project" operator — Choosing which columns to show
+// ---------------------------------------------------------------------------
+// Tables have many columns. Use "project" to pick only the ones you need.
+// This makes results easier to read.
+
+AppRequests
+| where TimeGenerated > ago(24h)
+| project TimeGenerated, Name, DurationMs, Success, ResultCode
+| take 10
+
+// Now you see just 5 clean columns instead of the full wide table.
+
+
+// ---------------------------------------------------------------------------
+// STEP 6: The "sort" operator — Ordering your results
+// ---------------------------------------------------------------------------
+// Let's find the slowest requests. We sort by DurationMs in descending order.
+
+AppRequests
+| where TimeGenerated > ago(24h)
+| project TimeGenerated, Name, DurationMs, Success, ResultCode
+| sort by DurationMs desc
+| take 10
+
+// The slowest request is now at the top. Change "desc" to "asc" for
+// the fastest requests instead.
+
+
+// ---------------------------------------------------------------------------
+// STEP 7: The "count" operator — How many rows are there?
+// ---------------------------------------------------------------------------
+// "count" tells you the total number of rows that match your filters.
+
+AppRequests
+| where TimeGenerated > ago(24h)
+| count
+
+// This gives you a single number: how many requests happened in the last day.
+
+
+// ---------------------------------------------------------------------------
+// STEP 8: Quick look at all the main Foundry tables
+// ---------------------------------------------------------------------------
+// Let's check how many records exist in each of the key tables.
+// Run each query separately:
+
+// How many incoming requests?
+AppRequests
+| where TimeGenerated > ago(7d)
+| count
+
+// How many outbound dependency calls (model calls, tool calls)?
+AppDependencies
+| where TimeGenerated > ago(7d)
+| count
+
+// How many log messages / traces?
+AppTraces
+| where TimeGenerated > ago(7d)
+| count
+
+// How many exceptions / errors?
+AppExceptions
+| where TimeGenerated > ago(7d)
+| count
+
+
+// ---------------------------------------------------------------------------
+// STEP 9: The "extend" operator — Adding a calculated column
+// ---------------------------------------------------------------------------
+// "extend" creates a new column based on existing data.
+// Let's convert DurationMs to seconds for readability.
+
+AppRequests
+| where TimeGenerated > ago(24h)
+| extend DurationSeconds = DurationMs / 1000.0
+| project TimeGenerated, Name, DurationMs, DurationSeconds, Success
+| sort by DurationSeconds desc
+| take 10
+
+
+// ---------------------------------------------------------------------------
+// STEP 10: The "distinct" operator — Unique values
+// ---------------------------------------------------------------------------
+// What are the different operation names in our data?
+
+AppRequests
+| where TimeGenerated > ago(7d)
+| distinct OperationName
+
+// This shows you every unique operation name — helpful for understanding
+// what your Foundry application is doing.
+
+
+// ============================================================================
+// RECAP — KQL Operators You Learned:
+//
+//   take N          → Grab N rows (great for quick exploration)
+//   where           → Filter rows based on conditions
+//   project         → Choose which columns to display
+//   sort by         → Order results (asc or desc)
+//   count           → Count the number of matching rows
+//   extend          → Add a new calculated column
+//   distinct        → Show unique values
+//   ago()           → Time function (e.g., ago(1h), ago(7d))
+//
+// NEXT: Explore AppDependencies to analyze
+//       the AI model calls that Foundry makes.
+// ============================================================================

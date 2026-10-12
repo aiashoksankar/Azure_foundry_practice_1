@@ -1,0 +1,27 @@
+
+    /*
+     * Parameters for the Azure AI Language deployment.
+     * Update "accountName" with a globally unique name before deploying.
+     *
+     * Deploy with:
+     *   az deployment group create \
+     *     --resource-group <your-rg> \
+     *     --template-file deploy-language.json \
+     *     --parameters @deploy-language.parameters.json
+     */
+
+   {
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "accountName": {
+            "value": "ashok-language-demo-2026"
+        },
+        "location": {
+            "value": "eastus2"
+        },
+        "sku": {
+            "value": "S"
+        }
+    }
+}

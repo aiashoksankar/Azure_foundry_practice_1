@@ -1,0 +1,250 @@
+// ============================================================================
+// Token Usage Analysis — Understanding Costs and Consumption
+// ============================================================================
+//
+// WHAT YOU WILL LEARN:
+//   - How to calculate total token consumption per model
+//   - How to use "summarize" with "by" for grouping
+//   - How to use "bin()" for time-based grouping
+//   - How to visualize token usage over time with "render"
+//
+// WHY THIS MATTERS:
+//   Tokens directly translate to cost. Monitoring token usage helps you:
+//   - Spot unexpected spikes in consumption
+//   - Compare efficiency across models
+//   - Track usage trends over time
+//   - Optimize your Foundry agents to use fewer tokens
+//
+// WHERE TO RUN:
+//   Azure Portal → Log Analytics workspace → Logs
+// ============================================================================
+
+
+// ---------------------------------------------------------------------------
+// STEP 1: Total token usage in the last 24 hours
+// ---------------------------------------------------------------------------
+// Let's start simple: how many tokens did we use in total?
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    TotalInputTokens  = sum(InputTokens),
+    TotalOutputTokens = sum(OutputTokens),
+    TotalTokens       = sum(InputTokens) + sum(OutputTokens),
+    TotalCalls        = count()
+
+// You get one row showing your total token consumption and number of calls.
+
+
+// ---------------------------------------------------------------------------
+// STEP 2: Token usage broken down by model
+// ---------------------------------------------------------------------------
+// Different models have different costs. Let's see usage per model.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    ModelUsed    = tostring(Properties["gen_ai.response.model"]),
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    TotalInputTokens  = sum(InputTokens),
+    TotalOutputTokens = sum(OutputTokens),
+    TotalTokens       = sum(InputTokens) + sum(OutputTokens),
+    NumberOfCalls     = count()
+    by ModelUsed
+| sort by TotalTokens desc
+
+// The "by ModelUsed" clause groups the results per model.
+// You can now see which model consumes the most tokens.
+
+
+// ---------------------------------------------------------------------------
+// STEP 3: Average tokens per call — which model is most efficient?
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    ModelUsed    = tostring(Properties["gen_ai.response.model"]),
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"]),
+    TotalTokens  = toint(Properties["gen_ai.usage.input_tokens"]) + toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    AvgInputTokens  = avg(InputTokens),
+    AvgOutputTokens = avg(OutputTokens),
+    AvgTotalTokens  = avg(TotalTokens),
+    NumberOfCalls   = count()
+    by ModelUsed
+| sort by AvgTotalTokens desc
+
+
+// ---------------------------------------------------------------------------
+// STEP 4: Token usage over time — the "bin()" function
+// ---------------------------------------------------------------------------
+// "bin()" groups timestamps into time buckets. This is how you create
+// time-series data in KQL. Let's see hourly token usage.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    TotalTokens = sum(InputTokens) + sum(OutputTokens),
+    CallCount   = count()
+    by bin(TimeGenerated, 1h)
+| sort by TimeGenerated asc
+
+// Each row represents one hour. You can see how usage fluctuates.
+// "bin(TimeGenerated, 1h)" rounds each timestamp to the nearest hour.
+//
+// Other useful bin sizes:
+//   bin(TimeGenerated, 5m)   — every 5 minutes
+//   bin(TimeGenerated, 15m)  — every 15 minutes
+//   bin(TimeGenerated, 1d)   — daily
+
+
+// ---------------------------------------------------------------------------
+// STEP 5: Visualize token usage over time — the "render" operator
+// ---------------------------------------------------------------------------
+// KQL can create charts right inside the Log Analytics query editor!
+// Use "render timechart" to draw a line chart.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    InputTokens  = sum(InputTokens),
+    OutputTokens = sum(OutputTokens)
+    by bin(TimeGenerated, 1h)
+| render timechart
+
+// You should see a line chart with two lines:
+//   - InputTokens (prompt tokens sent to the model)
+//   - OutputTokens (completion tokens the model generated)
+
+
+// ---------------------------------------------------------------------------
+// STEP 6: Daily token usage over the past week
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    TotalTokens = sum(InputTokens) + sum(OutputTokens)
+    by bin(TimeGenerated, 1d)
+| render columnchart
+
+// This bar chart shows daily total token consumption — easy to spot trends.
+
+
+// ---------------------------------------------------------------------------
+// STEP 7: Token usage per model over time
+// ---------------------------------------------------------------------------
+// Let's combine model grouping with time grouping.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    ModelUsed   = tostring(Properties["gen_ai.response.model"]),
+    TotalTokens = toint(Properties["gen_ai.usage.input_tokens"]) + toint(Properties["gen_ai.usage.output_tokens"])
+| summarize TotalTokens = sum(TotalTokens) by bin(TimeGenerated, 1h), ModelUsed
+| render timechart
+
+// Each model gets its own line on the chart. Great for comparing models.
+
+
+// ---------------------------------------------------------------------------
+// STEP 8: Identify the most expensive individual calls
+// ---------------------------------------------------------------------------
+// Sometimes one agent call uses many more tokens than expected.
+// Let's find the top 10 most token-heavy calls.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    ModelUsed    = tostring(Properties["gen_ai.response.model"]),
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"]),
+    TotalTokens  = toint(Properties["gen_ai.usage.input_tokens"]) + toint(Properties["gen_ai.usage.output_tokens"])
+| project TimeGenerated, ModelUsed, InputTokens, OutputTokens, TotalTokens, DurationMs, OperationId
+| sort by TotalTokens desc
+| take 10
+
+// The OperationId lets you trace the full conversation across related telemetry.
+
+
+// ---------------------------------------------------------------------------
+// STEP 9: Token usage as a pie chart
+// ---------------------------------------------------------------------------
+// Which model accounts for what share of total token usage?
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    ModelUsed   = tostring(Properties["gen_ai.response.model"]),
+    TotalTokens = toint(Properties["gen_ai.usage.input_tokens"]) + toint(Properties["gen_ai.usage.output_tokens"])
+| summarize TotalTokens = sum(TotalTokens) by ModelUsed
+| render piechart
+
+// The pie chart shows the proportional token usage per model.
+
+
+// ---------------------------------------------------------------------------
+// STEP 10: Input vs. Output token ratio
+// ---------------------------------------------------------------------------
+// A high input-to-output ratio might mean your prompts are very long
+// relative to the model's responses.
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    ModelUsed    = tostring(Properties["gen_ai.response.model"]),
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    AvgInputTokens  = avg(InputTokens),
+    AvgOutputTokens = avg(OutputTokens)
+    by ModelUsed
+// Note: Division by zero returns real(+inf) in KQL — safe but worth filtering if needed
+| extend InputOutputRatio = round(AvgInputTokens / AvgOutputTokens, 2)
+
+// A ratio of 3.0 means for every output token, you sent 3 input tokens.
+// Very high ratios may indicate opportunities to optimize your prompts.
+
+
+// ============================================================================
+// RECAP — What You Learned:
+//
+//   - sum(), avg(), count()     → Aggregation functions inside summarize
+//   - bin(TimeGenerated, 1h)    → Group timestamps into time buckets
+//   - render timechart          → Draw a line chart over time
+//   - render columnchart        → Draw a bar chart
+//   - render piechart           → Draw a pie chart
+//   - round()                   → Round numbers to N decimal places
+//   - "by" clause in summarize  → Group results by one or more columns
+//
+//   These techniques let you build powerful token usage dashboards
+//   to monitor costs and optimize your Foundry agents.
+//
+// NEXT: Trace agent conversations end-to-end.
+// ============================================================================

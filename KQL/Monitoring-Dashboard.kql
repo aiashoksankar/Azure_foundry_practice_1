@@ -1,0 +1,246 @@
+// ============================================================================
+// Monitoring Dashboard Queries — Keeping an Eye on Your Agents
+// ============================================================================
+//
+// WHAT YOU WILL LEARN:
+//   - How to build real-world monitoring queries for Foundry agents
+//   - How to create visual dashboards using "render"
+//   - How to use "percentile()" for latency analysis
+//   - How to combine everything from Demos 01–05 into practical queries
+//
+// USE CASE:
+//   These queries are the kind you would pin to an Azure Dashboard or
+//   use in an Azure Workbook to continuously monitor your production agents.
+//
+// TIP:
+//   In Log Analytics, after running a query with "render", you can click
+//   "Pin to dashboard" to add the chart to your Azure Dashboard.
+//
+// WHERE TO RUN:
+//   Azure Portal → Log Analytics workspace → Logs
+// ============================================================================
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 1: Agent Activity Overview (last 24 hours)
+// ---------------------------------------------------------------------------
+// A quick snapshot of your Foundry agent activity.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| extend
+    ModelUsed = tostring(Properties["gen_ai.response.model"]),
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    TotalCalls        = count(),
+    SuccessfulCalls   = countif(Success == true),
+    FailedCalls       = countif(Success == false),
+    TotalInputTokens  = sum(InputTokens),
+    TotalOutputTokens = sum(OutputTokens),
+    AvgLatencyMs      = round(avg(DurationMs), 0),
+    ModelsUsed        = dcount(ModelUsed)
+
+// "dcount()" counts the number of distinct values — here, how many
+// different models were called. This gives you a single-row summary.
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 2: Requests per hour (timechart)
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| summarize CallCount = count() by bin(TimeGenerated, 1h)
+| render timechart with (title="AI Model Calls Per Hour")
+
+// The "with (title=...)" adds a title to your chart.
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 3: Latency percentiles per model
+// ---------------------------------------------------------------------------
+// Averages can be misleading. Percentiles tell a better story.
+//   P50 = Half of calls are faster than this
+//   P95 = 95% of calls are faster than this (the "slow" tail)
+//   P99 = Only 1% of calls are slower than this
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| extend ModelUsed = tostring(Properties["gen_ai.response.model"])
+| summarize
+    P50_ms = percentile(DurationMs, 50),
+    P95_ms = percentile(DurationMs, 95),
+    P99_ms = percentile(DurationMs, 99),
+    Calls  = count()
+    by ModelUsed
+
+// If P99 is much larger than P50, you have occasional slow responses.
+// This is normal for AI models, but extreme differences warrant investigation.
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 4: Latency trend over time
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| summarize
+    P50_ms = percentile(DurationMs, 50),
+    P95_ms = percentile(DurationMs, 95)
+    by bin(TimeGenerated, 1h)
+| render timechart with (title="Model Call Latency (P50 & P95)")
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 5: Error rate over time
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| summarize
+    TotalCalls = count(),
+    Failures   = countif(Success == false)
+    by bin(TimeGenerated, 1h)
+| extend ErrorRate = round(100.0 * Failures / TotalCalls, 1)
+| project TimeGenerated, ErrorRate
+| render timechart with (title="Error Rate (%)")
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 6: Token consumption trend
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Properties has "gen_ai.usage.input_tokens"
+| extend
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    InputTokens  = sum(InputTokens),
+    OutputTokens = sum(OutputTokens)
+    by bin(TimeGenerated, 1d)
+| render columnchart with (title="Daily Token Consumption")
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 7: Top agents by activity
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.agent.name"
+| extend AgentName = tostring(Properties["gen_ai.agent.name"])
+| summarize
+    Calls       = count(),
+    AvgLatency  = round(avg(DurationMs), 0),
+    ErrorCount  = countif(Success == false)
+    by AgentName
+| sort by Calls desc
+| render barchart with (title="Agent Activity")
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 8: Tool usage breakdown
+// ---------------------------------------------------------------------------
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.tool.name"
+| extend ToolName = tostring(Properties["gen_ai.tool.name"])
+| summarize CallCount = count() by ToolName
+| sort by CallCount desc
+| render piechart with (title="Tool Usage Distribution")
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 9: Slow requests — anything over 10 seconds
+// ---------------------------------------------------------------------------
+
+AppRequests
+| where TimeGenerated > ago(24h)
+| where DurationMs > 10000
+| extend DurationSeconds = round(DurationMs / 1000.0, 1)
+| project TimeGenerated, OperationName, DurationSeconds, Success, ResultCode, OperationId
+| sort by DurationSeconds desc
+| take 20
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 10: Hourly health scorecard
+// ---------------------------------------------------------------------------
+// Combine multiple metrics into one table for a complete picture.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.system"
+| extend
+    InputTokens  = toint(Properties["gen_ai.usage.input_tokens"]),
+    OutputTokens = toint(Properties["gen_ai.usage.output_tokens"])
+| summarize
+    Calls        = count(),
+    Errors       = countif(Success == false),
+    AvgLatencyMs = round(avg(DurationMs), 0),
+    P95Latency   = round(percentile(DurationMs, 95), 0),
+    TotalTokens  = sum(InputTokens) + sum(OutputTokens)
+    by bin(TimeGenerated, 1h)
+| extend
+    ErrorRate = round(100.0 * Errors / Calls, 1),
+    Hour      = format_datetime(TimeGenerated, "HH:mm")
+| project Hour, Calls, Errors, ErrorRate, AvgLatencyMs, P95Latency, TotalTokens
+| sort by Hour asc
+
+// This is your hourly health report — great to check each morning.
+// "format_datetime()" makes the time more human-readable.
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 11: Finish reasons distribution
+// ---------------------------------------------------------------------------
+// Why are model calls ending? "stop" is normal, "length" could be a problem.
+
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Properties has "gen_ai.response.finish_reasons"
+| extend FinishReason = tostring(Properties["gen_ai.response.finish_reasons"])
+| summarize Count = count() by FinishReason
+| render piechart with (title="Finish Reasons")
+
+
+// ---------------------------------------------------------------------------
+// DASHBOARD QUERY 12: Exception timeline
+// ---------------------------------------------------------------------------
+
+AppExceptions
+| where TimeGenerated > ago(7d)
+| summarize ExceptionCount = count() by bin(TimeGenerated, 1d), ExceptionType
+| render timechart with (title="Exceptions Over Time")
+
+
+// ============================================================================
+// RECAP — New KQL Functions You Learned:
+//
+//   dcount()             → Count distinct values
+//   percentile(col, N)   → Nth percentile value
+//   countif(condition)   → Count rows matching a condition
+//   format_datetime()    → Format time for display
+//   render ... with (title="...") → Add a chart title
+//   render barchart      → Bar chart (best for rankings)
+//
+// CHART TYPES SUMMARY:
+//   render timechart     → Line chart over time (best for trends)
+//   render columnchart   → Column chart (best for comparisons)
+//   render barchart      → Bar chart (similar to columnchart in Log Analytics)
+//   render piechart      → Pie chart (best for proportions)
+//
+// WHAT'S NEXT?
+//   - Pin these queries to an Azure Dashboard for real-time monitoring
+//   - Add them to an Azure Workbook for an interactive report
+//   - Set up Alerts based on these queries (e.g., error rate > 5%)
+// ============================================================================
